@@ -59,8 +59,8 @@ function adjustSingleSplit(splits: Splits, dataCube: DataCube, colors: Colors): 
   }
 
   return {
-    score: (score: (split: SplitCombine, dimension: Dimension, autoChanged: boolean) => Resolve) => {
-      return score(bucketedSplit, bucketedDimension, autoChanged);
+    then: (then: (split: SplitCombine, dimension: Dimension, autoChanged: boolean) => Resolve) => {
+      return then(bucketedSplit, bucketedDimension, autoChanged);
     }
   };
 }
@@ -71,17 +71,16 @@ function ensureSplitOrder(splits: Splits, primarySplit: SplitCombine, colorSplit
   if (splits.toArray().every((s) => s.isBucketed())) {
     var timeSplit = List(splits.toArray()).find((s) => s.getDimension(dimensions).kind === 'time');
     if (timeSplit && primarySplit !== timeSplit) {
-      self.adjust = (colors: Colors) => adjustTwoSplits(timeSplit, primarySplit, dataCube, colors);
+      self.then = (fn: () => any ) => fn.bind(null, timeSplit, primarySplit, dataCube, splits)();
       return self;
     }
   }
 
-  self.adjust = (colors: Colors) => adjustTwoSplits(primarySplit, colorSplit, dataCube, colors);
-  self.test = (fn: (colors: Colors) => any ) => fn.bind(self, primarySplit, colorSplit, dataCube)();
+  self.then = (fn: () => any ) => fn.bind(null, primarySplit, colorSplit, dataCube, splits)();
   return self;
 }
 
-function adjustTwoSplits(primarySplit: SplitCombine, colorSplit: SplitCombine, dataCube: DataCube, colors: Colors): any {
+function adjustTwoSplits(colors: Colors, primarySplit: SplitCombine, colorSplit: SplitCombine, dataCube: DataCube, splits: Splits): any {
   var primaryDimension = primarySplit.getDimension(dataCube.dimensions);
   let autoChanged = false;
 
@@ -113,11 +112,14 @@ function adjustTwoSplits(primarySplit: SplitCombine, colorSplit: SplitCombine, d
     autoChanged = true;
   }
 
-  var self: any = {};
-  self.resolve = () => resolveTwoSplits(primarySplit, colorSplit, primaryDimension, autoChanged, colors);
-  self.test = (fn: Function) => fn.bind(self, primarySplit, colorSplit, primaryDimension, autoChanged, colors)();
+  // need to mark for reorder so that color split is first
+  if (splits.first().equals(primarySplit)) {
+    autoChanged = true;
+  }
 
-  return self;
+  return {
+    then: (fn: Function) => fn.bind(null, primarySplit, colorSplit, primaryDimension, autoChanged, colors)()
+  };
 }
 
 function resolveTwoSplits(primarySplit: SplitCombine, colorSplit: SplitCombine, primaryDimension: Dimension,
@@ -129,6 +131,7 @@ function resolveTwoSplits(primarySplit: SplitCombine, colorSplit: SplitCombine, 
     score += 2;
     return Resolve.ready(score);
   }
+
   return Resolve.automatic(score, {
     splits: new Splits(List([colorSplit, primarySplit])),
     colors
@@ -157,7 +160,7 @@ var handler = CircumstancesHandler.EMPTY()
   })
   .then((splits: Splits, dataCube: DataCube, colors: Colors, current: boolean) => {
     return adjustSingleSplit(splits, dataCube, colors)
-      .score((split: SplitCombine, dimension: Dimension, autoChanged: boolean) => {
+      .then((split: SplitCombine, dimension: Dimension, autoChanged: boolean) => {
         var score = 5;
         if (split.canBucketByDefault(dataCube.dimensions)) score += 2;
         if (dimension.kind === 'time') score += 3;
@@ -174,15 +177,14 @@ var handler = CircumstancesHandler.EMPTY()
   .then((splits: Splits, dataCube: DataCube, colors: Colors) => {
     let primarySplit = splits.get(0);
     let colorSplit = splits.get(1);
-    return ensureSplitOrder(splits, primarySplit, colorSplit, dataCube).adjust(colors).resolve();
+    return ensureSplitOrder(splits, primarySplit, colorSplit, dataCube).then(adjustTwoSplits.bind(null, colors)).then(resolveTwoSplits);
   })
 
   .when((splits: Splits) => splits.length() === 2 && splits.get(1).isBucketed())
   .then((splits: Splits, dataCube: DataCube, colors: Colors) => {
     let primarySplit = splits.get(1);
     let colorSplit = splits.get(0);
-    console.log(ensureSplitOrder(splits, primarySplit, colorSplit, dataCube).test(adjustTwoSplits.bind(colors)).test(resolveTwoSplits));
-    return ensureSplitOrder(splits, primarySplit, colorSplit, dataCube).adjust(colors).resolve();
+    return ensureSplitOrder(splits, primarySplit, colorSplit, dataCube).then(adjustTwoSplits.bind(null, colors)).then(resolveTwoSplits);
   })
 
   .when((splits: Splits) => splits.toArray().some((s) => s.isBucketed()))
